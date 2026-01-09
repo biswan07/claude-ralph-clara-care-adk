@@ -1,0 +1,66 @@
+{
+  "project": "MyApp",
+  "branchName": "claude-ralph/task-priority-feature",
+  "description": "Add a task priority system that allows users to set, view, and filter tasks by priority level.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add priority field to task schema",
+      "description": "As a developer, I want to add a priority field to the task data model so that tasks can be categorized by importance.",
+      "acceptanceCriteria": [
+        "Add 'priority' field to task schema with values: 'low', 'medium', 'high'",
+        "Default priority is 'medium' for new tasks",
+        "Database migration creates the new column",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "This is a foundational change that other stories depend on."
+    },
+    {
+      "id": "US-002",
+      "title": "Display priority badge on task cards",
+      "description": "As a user, I want to see a visual indicator of task priority so that I can quickly identify important tasks.",
+      "acceptanceCriteria": [
+        "Priority badge shows on each task card",
+        "Badge colors: red for high, yellow for medium, gray for low",
+        "Badge text shows priority level",
+        "Typecheck passes",
+        "Verify in browser: badges display correctly on task list"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Depends on US-001 for the priority field."
+    },
+    {
+      "id": "US-003",
+      "title": "Add priority selector when creating/editing tasks",
+      "description": "As a user, I want to set the priority when creating or editing a task so that I can organize my work by importance.",
+      "acceptanceCriteria": [
+        "Priority dropdown appears in task create form",
+        "Priority dropdown appears in task edit form",
+        "Selection persists correctly to database",
+        "Typecheck passes",
+        "Verify in browser: can create task with each priority level"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Depends on US-001 for the priority field."
+    },
+    {
+      "id": "US-004",
+      "title": "Filter tasks by priority",
+      "description": "As a user, I want to filter my task list by priority so that I can focus on high-priority items.",
+      "acceptanceCriteria": [
+        "Filter dropdown with options: All, High, Medium, Low",
+        "Selecting a filter shows only matching tasks",
+        "Filter state persists during session",
+        "Typecheck passes",
+        "Verify in browser: filtering works correctly for each priority"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Can be implemented independently once US-001 is complete."
+    }
+  ]
+}

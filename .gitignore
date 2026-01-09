@@ -1,0 +1,21 @@
+# Claude Ralph ignores
+
+# Runtime files
+prd.json
+progress.txt
+.last-branch
+
+# Archive directory contents (keep the dir, ignore contents)
+archive/*
+!archive/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
