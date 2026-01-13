@@ -1,491 +1,335 @@
-# Claude Ralph
+# ClaraCare - Intelligent Warranty Claim Agent
 
-An autonomous AI agent loop that runs [Claude CLI](https://github.com/anthropics/claude-code) repeatedly until all PRD items are complete.
+ClaraCare is an AI-powered warranty claim processing system for **Smart Receipts** that automatically finds manufacturer support contacts, assesses confidence, and either auto-submits claims or routes them to human review.
 
-Inspired by [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/) and [snarktank/ralph](https://github.com/snarktank/ralph), adapted for Claude CLI.
+## The Problem
 
-## Features
+When users want to file warranty claims through Smart Receipts, finding the correct manufacturer support email is challenging:
+- Support contact information is scattered across manufacturer websites
+- Contact details change frequently
+- AI systems can "hallucinate" fake email addresses, misleading users
+- Manual research is time-consuming and error-prone
 
-- **Autonomous Execution** - Runs Claude repeatedly until all stories pass
-- **Token & Cost Tracking** - Monitor usage and set limits to control spending
-- **Session Logging** - Full logs for every iteration for debugging
-- **Retry Logic** - Automatic retries with exponential backoff
-- **Story Management** - Skip, select, or resume specific stories
-- **Notifications** - Slack and webhook notifications on completion
-- **Auto PR Creation** - Automatically create pull requests when done
-- **Custom Hooks** - Run scripts before/after iterations
-- **Dry Run Mode** - Preview without executing
+## The Solution
+
+ClaraCare is a multi-agent system that:
+
+1. **Searches** internal database AND the web simultaneously for support contacts
+2. **Validates** found emails (format, domain, brand match)
+3. **Assesses confidence** using multiple signals
+4. **Routes intelligently**:
+   - **High confidence (≥80%)**: Auto-submit the claim
+   - **Low confidence (<80%)**: Queue for human review
+   - **No email found**: Escalate to support specialist
+
+**Key Guarantee**: ClaraCare **never fabricates** email addresses. If confidence is low or no email is found, the claim is safely queued for human verification.
+
+---
 
 ## How It Works
 
-Claude Ralph spawns iterative Claude instances that:
-1. Read a PRD (`prd.json`) containing user stories
-2. Select the highest-priority incomplete story
-3. Implement that single story
-4. Run quality checks (typecheck, tests, lint)
-5. Commit working code
-6. Update progress tracking
-7. Repeat until all stories pass
-
-Each iteration is a **fresh Claude instance** with clean context. Memory persists through:
-- Git commit history
-- `progress.txt` (learnings across runs)
-- `prd.json` (completion status)
-- `CLAUDE.md` (project patterns)
-
-## Prerequisites
-
-- [Claude CLI](https://github.com/anthropics/claude-code) installed and authenticated
-- `jq` command-line tool
-- Git repository for your project
-- `bc` (optional, for cost calculations)
-- `gh` CLI (optional, for auto PR creation)
-
-```bash
-# Install dependencies
-brew install jq gh       # macOS
-apt install jq gh        # Ubuntu/Debian
 ```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    USER SUBMITS WARRANTY CLAIM                       │
+│                     via Smart Receipts App                          │
+└─────────────────────────────────┬───────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CLARACARE ORCHESTRATOR                           │
+│              Get claim details → Coordinate workflow                │
+└─────────────────────────────────┬───────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    PARALLEL SEARCH                                   │
+│  ┌─────────────────────────┐    ┌─────────────────────────┐        │
+│  │   Internal DB Search    │    │     Web Search          │        │
+│  │   (Known contacts in    │    │     (Google Search +    │        │
+│  │    Supabase)            │    │      Email extraction)  │        │
+│  └─────────────────────────┘    └─────────────────────────┘        │
+└─────────────────────────────────┬───────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      JUDGE AGENT                                     │
+│   Evaluate: source reliability, email validity, domain match,       │
+│   multiple source agreement → Confidence Score (0-100%)             │
+└─────────────────────────────────┬───────────────────────────────────┘
+                                  │
+                    ┌─────────────┴─────────────┬──────────────┐
+                    ▼                           ▼              ▼
+          ┌─────────────────┐        ┌─────────────────┐ ┌────────────┐
+          │ HIGH CONFIDENCE │        │ LOW CONFIDENCE  │ │ NO EMAIL   │
+          │     ≥ 80%       │        │     < 80%       │ │   FOUND    │
+          │                 │        │                 │ │            │
+          │ Writer Agent    │        │ Queue for Human │ │ Escalate   │
+          │ → Compose email │        │ Review          │ │ to Support │
+          │ → SUBMITTED     │        │ → PENDING       │ │ → REQUIRES │
+          │                 │        │                 │ │   _REVIEW  │
+          └─────────────────┘        └─────────────────┘ └────────────┘
+```
+
+---
+
+## User Experience
+
+### Auto-Submitted Claim (High Confidence)
+
+```
+✓ CLAIM SUBMITTED SUCCESSFULLY
+
+Your warranty claim CLM-001 has been submitted to Sony support.
+
+EMAIL DETAILS
+─────────────
+To: support@sony.com
+Subject: Warranty Claim - Sony WH-1000XM5 Headphones
+
+Dear Sony Support Team,
+I am writing to request warranty service for my Sony WH-1000XM5...
+
+CONFIDENCE METRICS
+──────────────────
+Confidence Score: 92% (Threshold: 80%)
+Decision: AUTO_SUBMIT
+Reasoning: Email found in internal database and confirmed via web search
+
+NEXT STEPS
+──────────
+- Your claim email has been queued for delivery
+- Expected response time: 3-5 business days
+```
+
+### Queued for Review (Low Confidence)
+
+```
+⚠ CLAIM QUEUED FOR REVIEW
+
+Your warranty claim CLM-002 requires additional verification.
+
+VERIFICATION STATUS
+───────────────────
+Confidence Score: 65% (Below threshold: 80%)
+Decision: HUMAN_REVIEW
+Reason: Email found via web search but domain doesn't match brand
+
+WHAT HAPPENS NEXT
+─────────────────
+- Our support team will verify the contact information
+- Expected response time: 24-48 hours
+```
+
+### Escalated (No Email Found)
+
+```
+⚠ SUPPORT CONTACT NOT FOUND
+
+Your warranty claim CLM-003 requires specialist assistance.
+
+SEARCH RESULTS
+──────────────
+Brand: Obscure Electronics
+Internal Database: No matching support contact found
+Web Search: No valid support email discovered
+
+WHAT HAPPENS NEXT
+─────────────────
+- Your claim has been escalated to a support specialist
+- Our team will research alternative contact methods
+- Expected response time: 24-48 hours
+```
+
+---
+
+## Architecture
+
+### Agents
+
+| Agent | Purpose |
+|-------|---------|
+| **Root Orchestrator** | Coordinates entire workflow, manages claim status |
+| **DB Search Agent** | Queries Supabase for known support contacts |
+| **Web Search Agent** | Searches Google, extracts and validates emails |
+| **Judge Agent** | Assesses confidence, makes routing decision |
+| **Writer Agent** | Composes professional warranty claim emails |
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| `search_support_contacts` | Query internal database by brand/category |
+| `search_support_email` | Web search for manufacturer support |
+| `validate_email` | Check format, DNS, domain match, suspicious patterns |
+| `update_claim_status` | Update claim status with full audit trail |
+| `get_claim_details` | Retrieve claim information for processing |
+
+### Database Schema
+
+```sql
+-- Known support contacts (grows over time)
+support_contacts (brand_name, support_email, support_phone, confidence_score)
+
+-- Warranty claims with full status tracking
+warranty_claims (user_id, brand_name, status, support_email_used,
+                 confidence_score, judge_reasoning, composed_email)
+
+-- Audit trail for all status changes
+claim_status_history (claim_id, old_status, new_status, reason, changed_by)
+```
+
+---
 
 ## Quick Start
 
-### 1. Copy to Your Project
+### 1. Setup Environment
 
 ```bash
-# Clone this repo
-git clone https://github.com/CalebWinston/claude-ralph.git
+cd apps/clara-care
 
-# Copy files to your project
-cp claude-ralph/claude-ralph.sh your-project/scripts/
-cp claude-ralph/prompt.md your-project/scripts/
-cp claude-ralph/prd.json.example your-project/prd.json
+# Copy environment template
+cp .env.example .env
+
+# Edit .env with your credentials
 ```
 
-### 2. Create Your PRD
-
-Option A: Use the PRD skill (if installed):
-```bash
-claude "Create a PRD for [your feature]"
-```
-
-Option B: Manually create `prd.json` based on the example.
-
-### 3. Convert to JSON Format
-
-If you have a markdown PRD:
-```bash
-claude "Convert tasks/prd-my-feature.md to ralph format"
-```
-
-### 4. Run Claude Ralph
+Required environment variables:
 
 ```bash
-./scripts/claude-ralph.sh [options]
+# Supabase (for database)
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# OpenAI (for embeddings)
+OPENAI_API_KEY=sk-...
+
+# Google Cloud (for ADK)
+GOOGLE_CLOUD_PROJECT=your-project-id
+GOOGLE_GENAI_USE_VERTEXAI=1
+
+# Configuration
+CONFIDENCE_THRESHOLD=0.80
+MODEL_NAME=gemini-2.5-flash
 ```
 
-## Command Line Options
-
-```
-Usage: ./claude-ralph.sh [options]
-
-Options:
-  -n, --max-iterations N    Maximum iterations (default: 10)
-  -c, --config FILE         Config file path (default: claude-ralph.config.json)
-  --dry-run                 Preview without running Claude
-  --skip STORY_ID           Skip specific story (can be repeated)
-  --only STORY_ID           Only run specific story (can be repeated)
-  --resume                  Resume from last incomplete story
-  --create-pr               Create PR when complete
-  --no-hooks                Disable pre/post hooks
-  -v, --verbose             Verbose output
-  -q, --quiet               Minimal output
-  -h, --help                Show this help
-```
-
-### Examples
+### 2. Install Dependencies
 
 ```bash
-# Run with defaults (10 iterations)
-./claude-ralph.sh
-
-# Limit to 5 iterations
-./claude-ralph.sh -n 5
-
-# Preview what would happen without running Claude
-./claude-ralph.sh --dry-run
-
-# Skip a problematic story
-./claude-ralph.sh --skip US-003
-
-# Only run specific stories
-./claude-ralph.sh --only US-001 --only US-002
-
-# Resume from where you left off and create PR when done
-./claude-ralph.sh --resume --create-pr
-
-# Run with verbose output
-./claude-ralph.sh -v
+uv sync
 ```
 
-## Configuration File
-
-Create `claude-ralph.config.json` to set defaults:
-
-```json
-{
-  "maxIterations": 10,
-  "maxRetries": 3,
-  "retryDelay": 5,
-  "maxTokens": 500000,
-  "maxCost": 10.00,
-  "webhookUrl": "",
-  "slackWebhook": "https://hooks.slack.com/services/...",
-  "createPrOnComplete": true,
-  "enableHooks": true
-}
-```
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `maxIterations` | Maximum loop iterations | 10 |
-| `maxRetries` | Retries per iteration on failure | 3 |
-| `retryDelay` | Seconds between retries | 5 |
-| `maxTokens` | Stop if total tokens exceed this (0 = unlimited) | 0 |
-| `maxCost` | Stop if estimated cost exceeds this in USD (0 = unlimited) | 0 |
-| `webhookUrl` | Generic webhook URL for notifications | "" |
-| `slackWebhook` | Slack webhook URL for notifications | "" |
-| `createPrOnComplete` | Auto-create PR when all stories complete | false |
-| `enableHooks` | Enable pre/post iteration hooks | true |
-
-## Token & Cost Tracking
-
-Claude Ralph tracks token usage and estimates costs across all iterations:
-
-```
-═══════════════════════════════════════════════════════════
-  Usage Summary
-═══════════════════════════════════════════════════════════
-  Total input tokens:  45,230
-  Total output tokens: 12,450
-  Estimated cost:      $0.32
-```
-
-### Setting Limits
-
-Prevent runaway costs by setting limits in the config:
-
-```json
-{
-  "maxTokens": 500000,
-  "maxCost": 10.00
-}
-```
-
-When limits are reached, Claude Ralph stops gracefully and sends a notification.
-
-## Session Logging
-
-Every iteration is logged to the `logs/` directory:
-
-```
-logs/
-├── session_20240115_143022.log      # Session summary
-├── iteration_20240115_143022_1.log  # Full output for iteration 1
-├── iteration_20240115_143022_2.log  # Full output for iteration 2
-└── ...
-```
-
-Use logs to debug failed iterations or review what Claude did.
-
-## Custom Hooks
-
-Run custom scripts at key points in the execution:
-
-```
-hooks/
-├── pre-iteration.sh     # Runs before each iteration
-├── post-iteration.sh    # Runs after each iteration
-└── on-complete.sh       # Runs when all done (or max iterations)
-```
-
-### Hook Environment Variables
-
-**pre-iteration.sh:**
-- `ITERATION` - Current iteration number
-
-**post-iteration.sh:**
-- `ITERATION` - Current iteration number
-- `STATUS` - "success" or "failed"
-- `STORY_ID` - Story that was worked on
-
-**on-complete.sh:**
-- `STATUS` - "success" or "failed"
-- `TOTAL_TOKENS` - Total tokens used
-- `ESTIMATED_COST` - Estimated cost in USD
-
-### Example Hook
+### 3. Run Locally
 
 ```bash
-#!/bin/bash
-# hooks/post-iteration.sh - Push after each successful iteration
+# Web UI at localhost:8000
+uv run adk web
 
-if [ "$STATUS" = "success" ]; then
-    git push origin HEAD
-    echo "Pushed changes for $STORY_ID"
-fi
+# Terminal mode
+uv run adk run clara_care
 ```
 
-## Notifications
-
-### Slack
-
-Set up Slack notifications by adding your webhook URL:
-
-```json
-{
-  "slackWebhook": "https://hooks.slack.com/services/T00/B00/xxx"
-}
-```
-
-### Generic Webhook
-
-For other services, use the generic webhook:
-
-```json
-{
-  "webhookUrl": "https://your-service.com/webhook"
-}
-```
-
-Payload format:
-```json
-{
-  "title": "Claude Ralph Complete",
-  "message": "All stories finished successfully",
-  "status": "success"
-}
-```
-
-## Auto PR Creation
-
-Automatically create a pull request when all stories complete:
+### 4. Run Tests
 
 ```bash
-./claude-ralph.sh --create-pr
+uv run pytest
 ```
 
-Or set in config:
-```json
-{
-  "createPrOnComplete": true
-}
+### 5. Deploy to Production
+
+```bash
+uv run python scripts/deploy_to_agent_engine.py
 ```
 
-The PR includes:
-- Summary from prd.json description
-- List of completed stories
-- Token usage statistics
+---
 
-Requires `gh` CLI to be installed and authenticated.
-
-## File Structure
+## Project Structure
 
 ```
-your-project/
+apps/clara-care/
+├── clara_care/
+│   ├── __init__.py              # Exports root_agent
+│   ├── agent.py                 # Root orchestrator
+│   ├── config.py                # Environment configuration
+│   ├── supabase_client.py       # Database client
+│   │
+│   ├── tools/
+│   │   ├── db_search.py         # Internal DB search
+│   │   ├── web_search.py        # Web search + extraction
+│   │   ├── email_validator.py   # Email validation
+│   │   └── claim_status.py      # Status management
+│   │
+│   └── sub_agents/
+│       ├── db_search_agent/     # DB specialist
+│       ├── web_search_agent/    # Web specialist
+│       ├── judge_agent/         # Confidence assessment
+│       ├── writer_agent/        # Email composition
+│       ├── search_pipeline/     # Parallel search
+│       └── search_judge_pipeline/ # Sequential pipeline
+│
 ├── scripts/
-│   ├── claude-ralph.sh              # Main loop script
-│   └── prompt.md                    # Instructions for each Claude instance
-├── claude-ralph.config.json         # Configuration (optional)
-├── prd.json                         # User stories with pass/fail status
-├── progress.txt                     # Append-only learnings log
-├── CLAUDE.md                        # Project-specific Claude instructions
-├── hooks/                           # Custom hooks (optional)
-│   ├── pre-iteration.sh
-│   ├── post-iteration.sh
-│   └── on-complete.sh
-├── logs/                            # Session and iteration logs
-└── archive/                         # Archived previous runs
+│   ├── deploy_to_agent_engine.py  # Production deployment
+│   └── test_deployed_agent.py     # Test deployed agent
+│
+├── tests/
+│   ├── unit/test_tools.py         # Tool unit tests
+│   └── integration/test_workflow.py # Full workflow tests
+│
+├── pyproject.toml
+├── .env.example
+└── README.md
 ```
 
-## PRD Format
+---
 
-```json
-{
-  "project": "MyApp",
-  "branchName": "claude-ralph/feature-name",
-  "description": "Feature description",
-  "userStories": [
-    {
-      "id": "US-001",
-      "title": "Story title",
-      "description": "As a [role], I want [feature]...",
-      "acceptanceCriteria": [
-        "Specific criterion 1",
-        "Typecheck passes"
-      ],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
-    }
-  ]
-}
-```
+## Configuration
 
-## Slash Command
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CONFIDENCE_THRESHOLD` | 0.80 | Minimum confidence for auto-submit |
+| `MODEL_NAME` | gemini-2.5-flash | LLM model for agents |
+| `EMBEDDING_MODEL` | text-embedding-3-small | OpenAI embedding model |
 
-### `/ralph` - Quick Start Command
+---
 
-The easiest way to use Claude Ralph is with the `/ralph` slash command in Claude CLI.
+## Success Metrics
 
-**Install:**
-```bash
-mkdir -p ~/.claude/commands
-cp commands/ralph.md ~/.claude/commands/
-```
+| Metric | Target |
+|--------|--------|
+| Email accuracy rate | ≥95% |
+| Auto-submission rate | ≥80% of claims |
+| Human review queue | ≤20% of claims |
+| False positive rate | <2% |
+| Processing time | <10 seconds |
 
-**Usage:**
-```bash
-claude
-> /ralph
-```
+---
 
-This gives you an interactive menu to:
-1. **Setup** - Install Claude Ralph in your current project
-2. **Create PRD** - Generate a new PRD through guided Q&A
-3. **Convert PRD** - Turn markdown PRD into `prd.json`
-4. **Run** - Start the autonomous loop
-
-### Skills
-
-#### PRD Generator (`skills/prd/`)
-
-Generates comprehensive Product Requirements Documents through interactive Q&A.
-
-Usage:
-```bash
-claude "Create a PRD for user authentication"
-```
-
-#### PRD to JSON Converter (`skills/ralph/`)
-
-Converts markdown PRDs to `prd.json` format for Claude Ralph execution.
-
-Usage:
-```bash
-claude "Convert this PRD to ralph format"
-```
-
-### Installing All Commands & Skills
+## Development
 
 ```bash
-mkdir -p ~/.claude/commands
-cp commands/ralph.md ~/.claude/commands/
-cp -r skills/prd ~/.claude/commands/
-cp -r skills/ralph ~/.claude/commands/
+# Type check
+uv run mypy clara_care
+
+# Lint
+uv run ruff check clara_care
+
+# Format
+uv run ruff format clara_care
+
+# Run all tests
+uv run pytest -v
 ```
 
-## Critical Concepts
+---
 
-### Fresh Context Per Iteration
+## Built With
 
-Each Claude instance is independent. No conversation history carries over. Memory flows through:
-- Git commits from previous work
-- `progress.txt` with accumulated learnings
-- `prd.json` completion markers
+- **[Google ADK](https://google.github.io/adk-docs/)** - Agent Development Kit
+- **[Gemini](https://ai.google.dev/)** - LLM for agent reasoning
+- **[Supabase](https://supabase.com/)** - Database and authentication
+- **[Claude Code](https://github.com/anthropics/claude-code)** - Development assistance
 
-### Small, Focused Tasks
-
-Stories must be completable within one context window:
-
-**Good story sizes:**
-- Add a database column
-- Create a single UI component
-- Implement one API endpoint
-- Add a specific validation rule
-
-**Too large (split these up):**
-- Build entire dashboard
-- Implement full authentication system
-- Create complete admin panel
-
-### Quality Feedback Loops
-
-Every iteration runs quality checks. Broken code compounds across iterations, so:
-- Typecheck must pass
-- Tests must pass
-- Lint must pass
-
-### CLAUDE.md Updates
-
-After each iteration, discovered patterns should be added to `CLAUDE.md` files. This helps future iterations understand:
-- API conventions
-- Non-obvious requirements
-- File dependencies
-- Testing approaches
-
-## Debugging
-
-Check current state:
-```bash
-# View story status
-cat prd.json | jq '.userStories[] | {id, title, passes}'
-
-# View progress log
-cat progress.txt
-
-# View recent commits
-git log --oneline -10
-
-# View session logs
-ls -la logs/
-
-# View specific iteration log
-cat logs/iteration_*.log | less
-```
-
-## Resume After Interruption
-
-If Claude Ralph is interrupted, use `--resume` to continue:
-
-```bash
-./claude-ralph.sh --resume
-```
-
-This restores:
-- Token/cost counters from previous session
-- Continues from next incomplete story
-
-## Archive
-
-When starting a new feature, Claude Ralph automatically archives the previous run:
-```
-archive/
-└── 2024-01-15-previous-feature/
-    ├── prd.json
-    ├── progress.txt
-    ├── logs/
-    └── .ralph-state.json
-```
-
-## Differences from Original Ralph
-
-| Original (Amp) | Claude Ralph |
-|----------------|--------------|
-| `amp --dangerously-allow-all` | `claude -p "..." --dangerously-skip-permissions` |
-| `~/.config/amp/skills/` | `~/.claude/commands/` |
-| `AGENTS.md` | `CLAUDE.md` |
-| `<promise>COMPLETE</promise>` | `RALPH_COMPLETE` |
-| No token tracking | Built-in token & cost tracking |
-| No retry logic | Configurable retries with backoff |
-| No notifications | Slack & webhook support |
-| No hooks | Pre/post iteration hooks |
+---
 
 ## License
 
 MIT
-
-## Credits
-
-- Original Ralph pattern by [Geoffrey Huntley](https://ghuntley.com/ralph/)
-- Amp implementation by [snarktank](https://github.com/snarktank/ralph)
-- Claude CLI by [Anthropic](https://github.com/anthropics/claude-code)
