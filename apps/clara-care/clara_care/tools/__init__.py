@@ -6,10 +6,16 @@ from clara_care.tools.claim_status import (
     update_claim_status,
 )
 from clara_care.tools.db_search import search_support_contacts
+from clara_care.tools.web_search import (
+    parse_search_results_for_emails,
+    search_support_email,
+)
 
 __all__ = [
     "ClaimStatus",
     "get_claim_status",
+    "parse_search_results_for_emails",
     "search_support_contacts",
+    "search_support_email",
     "update_claim_status",
 ]
