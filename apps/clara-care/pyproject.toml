@@ -48,6 +48,7 @@ module = [
     "google.adk.*",
     "google.genai.*",
     "supabase.*",
+    "vertexai.*",
 ]
 ignore_missing_imports = true
 
