@@ -80,12 +80,27 @@ email. When the judge_verdict shows confidence_score >= {confidence_threshold}:
    - Confirmation message
 
 **LOW CONFIDENCE (< {confidence_threshold})**: HUMAN_REVIEW flow
-- The judge_verdict.decision will be "HUMAN_REVIEW"
-- Do NOT compose or send any email
-- Update claim status to PENDING with reason: "Low confidence - requires human
-  verification"
-- Return message: "Your claim requires additional verification and has been
-  queued for review"
+This is the cautious path for claims where confidence is below threshold.
+When the judge_verdict shows confidence_score < {confidence_threshold}:
+
+1. DO NOT trigger the writer_agent - no email should be composed or sent
+
+2. GATHER attempted emails from search results for audit:
+   - Extract emails from internal_search_result (if found)
+   - Extract emails from web_search_result (if found)
+   - Format as JSON array with scores:
+     '[{{"email": "email@brand.com", "score": 0.65}}, ...]'
+
+3. UPDATE claim status to PENDING using `update_claim_status`:
+   - claim_id: The claim being processed
+   - status: "PENDING"
+   - confidence_score: The confidence_score from judge_verdict
+   - judge_reasoning: The reasoning from judge_verdict
+   - attempted_emails: JSON array of emails with their confidence scores
+   - pending_reason: "Low confidence - requires human verification"
+
+4. RETURN message to user:
+   "Your claim requires additional verification and has been queued for review"
 
 **NO EMAIL FOUND**: REQUIRES_REVIEW flow
 - Neither search found a valid email
@@ -96,8 +111,17 @@ email. When the judge_verdict shows confidence_score >= {confidence_threshold}:
 ## TOOLS AVAILABLE
 
 1. `get_claim_details(claim_id)` - Retrieve full claim information
-2. `update_claim_status(claim_id, status, support_email_used, confidence_score,
-   judge_reasoning)` - Update claim status for tracking
+
+2. `update_claim_status(claim_id, status, ...)` - Update claim status for tracking
+   Parameters:
+   - claim_id: The claim ID
+   - status: PENDING, SUBMITTED, FAILED, or REQUIRES_REVIEW
+   - support_email_used: Email used for SUBMITTED status
+   - confidence_score: Judge confidence (0.0-1.0)
+   - judge_reasoning: Explanation for the decision
+   - attempted_emails: JSON array for PENDING status (low confidence)
+     Format: '[{{"email": "x@brand.com", "score": 0.65}}]'
+   - pending_reason: Human-readable reason for PENDING status
 
 ## SUB-AGENTS AVAILABLE
 
@@ -146,14 +170,29 @@ NEXT STEPS
 - Expected response time: 3-5 business days
 ```
 
-For HUMAN_REVIEW:
+For HUMAN_REVIEW (LOW CONFIDENCE < {confidence_threshold}):
 ```
-Your warranty claim [claim_id] requires additional verification.
+⚠ CLAIM QUEUED FOR REVIEW
 
-We found potential support contacts but could not verify them with high
-confidence. Your claim has been queued for review by our support team.
+Your warranty claim [claim_id] requires additional verification and has been
+queued for review.
 
-Expected response time: 24-48 hours
+---
+VERIFICATION STATUS
+---
+Confidence Score: [score]% (Below threshold: {confidence_threshold_percent}%)
+Decision: HUMAN_REVIEW
+Reason: Low confidence - requires human verification
+
+---
+WHAT HAPPENS NEXT
+---
+- Our support team will verify the support contact information
+- You will be notified once verification is complete
+- Expected response time: 24-48 hours
+
+We found potential contact(s) but cannot auto-submit without higher confidence.
+Your claim is safely queued and will not be lost.
 ```
 
 For REQUIRES_REVIEW:
@@ -178,6 +217,10 @@ Expected response time: 24-48 hours
 7. For AUTO_SUBMIT flow: ALWAYS trigger writer_agent, then update status to SUBMITTED
 8. For AUTO_SUBMIT flow: ALWAYS include email preview in response to user
 9. Store support_email_used, confidence_score, and judge_reasoning in status update
+10. For HUMAN_REVIEW: NEVER trigger writer_agent when confidence < threshold
+11. For HUMAN_REVIEW: ALWAYS update status to PENDING with attempted_emails
+12. For HUMAN_REVIEW: ALWAYS include pending_reason for audit trail
+13. For HUMAN_REVIEW: Return user message about queued for verification
 """
 
 
@@ -274,6 +317,14 @@ HUMAN_REVIEW (< {int(settings.confidence_threshold * 100)}%)
     - Update claim status to SUBMITTED with support_email_used, confidence_score,
       and judge_reasoning
     - Return confirmation with email preview to user
+
+    HUMAN_REVIEW FLOW (US-016):
+    - When confidence < {settings.confidence_threshold}: DO NOT trigger writer_agent
+    - Update claim status to PENDING with attempted_emails, confidence_score,
+      judge_reasoning, and pending_reason
+    - Store pending_reason: "Low confidence - requires human verification"
+    - Return message: "Your claim requires additional verification and has been
+      queued for review"
 
     THRESHOLD: {settings.confidence_threshold} confidence for auto-submit
     """,

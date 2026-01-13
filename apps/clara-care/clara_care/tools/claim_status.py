@@ -32,6 +32,8 @@ def update_claim_status(
     support_email_used: str = "",
     confidence_score: float = 0.0,
     judge_reasoning: str = "",
+    attempted_emails: str = "",
+    pending_reason: str = "",
     tool_context: Any = None,
 ) -> str:
     """
@@ -45,9 +47,14 @@ def update_claim_status(
         status (str): New status. Must be one of: PENDING, SUBMITTED, FAILED,
             REQUIRES_REVIEW.
         support_email_used (str): The support email address used for submission
-            (if applicable).
+            (if applicable). Use for SUBMITTED status.
         confidence_score (float): Confidence score from the judge agent (0.0-1.0).
         judge_reasoning (str): Explanation from the judge agent for the decision.
+        attempted_emails (str): JSON array of attempted email addresses with their
+            confidence scores. Use for PENDING status (low confidence flow).
+            Format: '[{"email": "support@brand.com", "score": 0.65}]'
+        pending_reason (str): Human-readable reason for PENDING status.
+            Example: "Low confidence - requires human verification"
         tool_context (ToolContext): ADK context for user_id access (ALWAYS LAST).
 
     Returns:
@@ -58,10 +65,17 @@ def update_claim_status(
         - updated_at (str): ISO timestamp of the update
         - message (str): Human-readable result message
 
-    Example:
-        Input: claim_id="claim-123", status="SUBMITTED", confidence_score=0.85
+    Example (SUBMITTED):
+        Input: claim_id="claim-123", status="SUBMITTED", confidence_score=0.85,
+               support_email_used="support@sony.com"
         Output: {"success": true, "claim_id": "claim-123", "status": "SUBMITTED",
                 "updated_at": "2026-01-13T10:30:00Z", "message": "Claim status updated"}
+
+    Example (PENDING - low confidence):
+        Input: claim_id="claim-123", status="PENDING", confidence_score=0.65,
+               attempted_emails='[{"email": "help@brand.com", "score": 0.65}]',
+               pending_reason="Low confidence - requires human verification"
+        Output: {"success": true, "claim_id": "claim-123", "status": "PENDING", ...}
     """
     # Validate claim_id
     if not claim_id or not claim_id.strip():
@@ -122,6 +136,14 @@ def update_claim_status(
         if judge_reasoning and judge_reasoning.strip():
             update_data["judge_reasoning"] = judge_reasoning.strip()
 
+        # For PENDING status (low-confidence flow), store attempted emails
+        if attempted_emails and attempted_emails.strip():
+            update_data["attempted_emails"] = attempted_emails.strip()
+
+        # Store pending reason for human review context
+        if pending_reason and pending_reason.strip():
+            update_data["pending_reason"] = pending_reason.strip()
+
         response = client.table("warranty_claims").update(
             update_data
         ).eq("id", claim_id.strip()).execute()
@@ -137,12 +159,16 @@ def update_claim_status(
 
         # Record status change in history table for audit trail
         email_for_history = support_email_used.strip() if support_email_used else None
-        history_data = {
+        attempted_emails_val = attempted_emails.strip() if attempted_emails else None
+        pending_reason_val = pending_reason.strip() if pending_reason else None
+        history_data: dict[str, Any] = {
             "claim_id": claim_id.strip(),
             "status": validated_status.value,
             "support_email_used": email_for_history,
             "confidence_score": confidence_score if confidence_score > 0 else None,
             "judge_reasoning": judge_reasoning.strip() if judge_reasoning else None,
+            "attempted_emails": attempted_emails_val,
+            "pending_reason": pending_reason_val,
             "created_at": now_iso,
             "created_by": user_id,
         }
