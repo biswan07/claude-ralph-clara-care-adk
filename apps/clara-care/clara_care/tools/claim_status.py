@@ -340,3 +340,139 @@ def get_claim_status(
             "message": error_msg,
             "error": True,
         })
+
+
+def get_claim_details(
+    claim_id: str,
+    tool_context: Any = None,
+) -> str:
+    """
+    Retrieve full details of a warranty claim for processing.
+
+    Use this tool to get all claim information needed for the warranty claim
+    workflow, including user details, product information, and issue description.
+
+    Args:
+        claim_id (str): The unique identifier for the warranty claim.
+        tool_context (ToolContext): ADK context for user_id access (ALWAYS LAST).
+
+    Returns:
+        JSON string with full claim details containing:
+        - found (bool): Whether the claim was found
+        - claim_id (str): The claim identifier
+        - user (dict): User contact information (name, email, phone)
+        - product (dict): Product details (brand, name, category, serial_number,
+            purchase_date)
+        - issue (dict): Issue description and occurrence date
+        - receipt_reference (str): Reference to proof of purchase
+        - status (str): Current claim status
+        - message (str): Human-readable summary
+
+    Example:
+        Input: claim_id="CLM-12345"
+        Output: {"found": true, "claim_id": "CLM-12345", "user": {...},
+                "product": {...}, "issue": {...}, ...}
+    """
+    # Validate claim_id
+    if not claim_id or not claim_id.strip():
+        return json.dumps({
+            "found": False,
+            "claim_id": "",
+            "message": "Error: claim_id is required and cannot be empty.",
+        })
+
+    # Get user_id from session state if available (for audit purposes)
+    user_id: str | None = None
+    if tool_context is not None:
+        state = getattr(tool_context, "state", None)
+        if state is not None:
+            user_id_value = state.get("user_id")
+            if isinstance(user_id_value, str):
+                user_id = user_id_value
+
+    logger.info(
+        "Retrieving claim details: claim_id=%s, user_id=%s",
+        claim_id.strip(),
+        user_id,
+    )
+
+    try:
+        client = get_client()
+
+        # Query full claim details from warranty_claims table
+        response = client.table("warranty_claims").select(
+            "id, status, user_name, user_email, user_phone, "
+            "product_brand, product_name, product_category, "
+            "product_serial_number, purchase_date, "
+            "issue_description, issue_occurrence_date, "
+            "receipt_reference, created_at, updated_at"
+        ).eq("id", claim_id.strip()).execute()
+
+        if not response.data or len(response.data) == 0:
+            return json.dumps({
+                "found": False,
+                "claim_id": claim_id.strip(),
+                "message": f"Claim with id '{claim_id}' not found.",
+            })
+
+        claim_data = response.data[0]
+        if not isinstance(claim_data, dict):
+            return json.dumps({
+                "found": False,
+                "claim_id": claim_id.strip(),
+                "message": "Error: Unexpected data format from database.",
+            })
+
+        result = {
+            "found": True,
+            "claim_id": claim_data.get("id"),
+            "user": {
+                "name": claim_data.get("user_name"),
+                "email": claim_data.get("user_email"),
+                "phone": claim_data.get("user_phone"),
+            },
+            "product": {
+                "brand": claim_data.get("product_brand"),
+                "name": claim_data.get("product_name"),
+                "category": claim_data.get("product_category"),
+                "serial_number": claim_data.get("product_serial_number"),
+                "purchase_date": claim_data.get("purchase_date"),
+            },
+            "issue": {
+                "description": claim_data.get("issue_description"),
+                "occurrence_date": claim_data.get("issue_occurrence_date"),
+            },
+            "receipt_reference": claim_data.get("receipt_reference"),
+            "status": claim_data.get("status"),
+            "created_at": claim_data.get("created_at"),
+            "updated_at": claim_data.get("updated_at"),
+            "message": f"Found claim {claim_id.strip()}",
+        }
+
+        logger.info(
+            "Claim details retrieved: claim_id=%s, brand=%s",
+            claim_id.strip(),
+            claim_data.get("product_brand"),
+        )
+
+        return json.dumps(result, indent=2)
+
+    except SupabaseConnectionError as e:
+        error_msg = f"Database connection error: {e}"
+        logger.error(error_msg)
+        return json.dumps({
+            "found": False,
+            "claim_id": claim_id.strip(),
+            "message": error_msg,
+            "error": True,
+        })
+
+    except Exception as e:
+        error_msg = f"Error retrieving claim details: {e}"
+        logger.error(error_msg, exc_info=True)
+        return json.dumps({
+            "found": False,
+            "claim_id": claim_id.strip(),
+            "message": error_msg,
+            "error": True,
+        })
