@@ -56,13 +56,30 @@ The pipeline will provide:
 
 ### Step 3: Route Based on Confidence
 
-**HIGH CONFIDENCE (>= 0.80)**: AUTO_SUBMIT flow
-- The judge_verdict.decision will be "AUTO_SUBMIT"
-- Delegate to `writer_agent` to compose a professional warranty claim email
-- Update claim status to SUBMITTED using `update_claim_status`
-- Return confirmation with email preview to user
+**HIGH CONFIDENCE (>= {confidence_threshold})**: AUTO_SUBMIT flow
+This is the happy path for claims where we have high confidence in the support
+email. When the judge_verdict shows confidence_score >= {confidence_threshold}:
 
-**LOW CONFIDENCE (< 0.80)**: HUMAN_REVIEW flow
+1. TRIGGER the `writer_agent` to compose a professional warranty claim email
+   - The writer_agent reads claim_details and judge_verdict from state
+   - It composes an email using the judge's recommended_email address
+   - Output is stored in state as `composed_email`
+
+2. UPDATE claim status to SUBMITTED using `update_claim_status`:
+   - claim_id: The claim being processed
+   - status: "SUBMITTED"
+   - support_email_used: The recommended_email from judge_verdict
+   - confidence_score: The confidence_score from judge_verdict
+   - judge_reasoning: The reasoning from judge_verdict
+
+3. RETURN confirmation with email preview to user including:
+   - Claim ID
+   - Support email address used
+   - Email subject and body preview
+   - Confidence score (as percentage)
+   - Confirmation message
+
+**LOW CONFIDENCE (< {confidence_threshold})**: HUMAN_REVIEW flow
 - The judge_verdict.decision will be "HUMAN_REVIEW"
 - Do NOT compose or send any email
 - Update claim status to PENDING with reason: "Low confidence - requires human
@@ -100,16 +117,33 @@ After processing, these keys will be in session state:
 
 Always respond with a clear summary for the user:
 
-For AUTO_SUBMIT:
+For AUTO_SUBMIT (HIGH CONFIDENCE >= {confidence_threshold}):
 ```
+✓ CLAIM SUBMITTED SUCCESSFULLY
+
 Your warranty claim [claim_id] has been submitted to [brand] support.
 
-Email sent to: [support_email]
+---
+EMAIL DETAILS
+---
+To: [support_email]
 Subject: [subject]
 
-Confidence Score: [score]%
+[First 200 characters of email body...]
 
-We will notify you when we receive a response.
+---
+CONFIDENCE METRICS
+---
+Confidence Score: [score]% (Threshold: {confidence_threshold_percent}%)
+Decision: AUTO_SUBMIT
+Reasoning: [Brief judge reasoning]
+
+---
+NEXT STEPS
+---
+- Your claim email has been queued for delivery
+- We will notify you when we receive a response from [brand] support
+- Expected response time: 3-5 business days
 ```
 
 For HUMAN_REVIEW:
@@ -139,8 +173,33 @@ Expected response time: 24-48 hours
 3. NEVER send emails directly - only compose via writer_agent
 4. ALWAYS update claim status before returning to user
 5. NEVER fabricate support email addresses
-6. Confidence threshold for auto-submit is 0.80 (80%)
+6. Confidence threshold for auto-submit is {confidence_threshold}
+   (that's {confidence_threshold_percent}%)
+7. For AUTO_SUBMIT flow: ALWAYS trigger writer_agent, then update status to SUBMITTED
+8. For AUTO_SUBMIT flow: ALWAYS include email preview in response to user
+9. Store support_email_used, confidence_score, and judge_reasoning in status update
 """
+
+
+def build_root_instruction() -> str:
+    """
+    Build the root agent instruction with actual configuration values.
+
+    This function interpolates the confidence threshold from settings into the
+    instruction template. Dynamic content is placed at the end to maximize
+    Gemini prompt caching for the static content.
+
+    Returns:
+        str: The complete instruction string with threshold values.
+    """
+    threshold = settings.confidence_threshold
+    threshold_percent = int(threshold * 100)
+
+    return ROOT_AGENT_INSTRUCTION.format(
+        confidence_threshold=threshold,
+        confidence_threshold_percent=threshold_percent,
+    )
+
 
 # =============================================================================
 # CALLBACK FUNCTIONS
@@ -195,7 +254,7 @@ async def before_agent_callback(
 root_agent = LlmAgent(
     name="clara_care_orchestrator",
     model=settings.model_name,
-    description="""Root orchestrator for ClaraCare warranty claim processing.
+    description=f"""Root orchestrator for ClaraCare warranty claim processing.
 
     USE FOR:
     - Processing warranty claims end-to-end
@@ -206,11 +265,19 @@ root_agent = LlmAgent(
     1. Get claim details
     2. Search for support contacts (parallel DB + web)
     3. Judge confidence in results
-    4. Route: AUTO_SUBMIT (>= 80%) or HUMAN_REVIEW (< 80%)
+    4. Route: AUTO_SUBMIT (>= {int(settings.confidence_threshold * 100)}%) or \
+HUMAN_REVIEW (< {int(settings.confidence_threshold * 100)}%)
 
-    THRESHOLD: 0.80 confidence for auto-submit
+    AUTO_SUBMIT FLOW (US-015):
+    - When confidence >= {settings.confidence_threshold}: trigger writer_agent
+    - Compose email with recommended support address
+    - Update claim status to SUBMITTED with support_email_used, confidence_score,
+      and judge_reasoning
+    - Return confirmation with email preview to user
+
+    THRESHOLD: {settings.confidence_threshold} confidence for auto-submit
     """,
-    instruction=ROOT_AGENT_INSTRUCTION,
+    instruction=build_root_instruction(),
     tools=[
         get_claim_details,
         update_claim_status,
