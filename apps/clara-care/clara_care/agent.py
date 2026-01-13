@@ -102,11 +102,32 @@ When the judge_verdict shows confidence_score < {confidence_threshold}:
 4. RETURN message to user:
    "Your claim requires additional verification and has been queued for review"
 
-**NO EMAIL FOUND**: REQUIRES_REVIEW flow
-- Neither search found a valid email
-- Update claim status to REQUIRES_REVIEW
-- Return message: "We could not find support contact information for [brand].
-  A support specialist will assist you."
+**NO EMAIL FOUND (neither search found valid email)**: REQUIRES_REVIEW flow
+This handles the edge case when neither internal DB nor web search finds any email.
+The judge_verdict will indicate no valid email was found.
+
+1. DETECT no email found by checking:
+   - judge_verdict has no recommended_email (empty or null)
+   - OR judge_verdict explicitly states "no email found" in reasoning
+   - OR both internal_search_result and web_search_result have found=false
+
+2. DO NOT trigger the writer_agent - there's no email to compose to
+
+3. GATHER search attempt information for audit:
+   - Record that internal database was searched (for what brand/category)
+   - Record that web search was attempted (what queries were used)
+   - Store in judge_reasoning for transparency
+
+4. UPDATE claim status to REQUIRES_REVIEW using `update_claim_status`:
+   - claim_id: The claim being processed
+   - status: "REQUIRES_REVIEW"
+   - confidence_score: 0.0 (no email found means zero confidence)
+   - judge_reasoning: Include what was searched and why nothing was found
+   - pending_reason: "No support contact information found for [brand]"
+
+5. RETURN message to user:
+   "We could not find support contact information for [brand].
+   A support specialist will assist you."
 
 ## TOOLS AVAILABLE
 
@@ -195,14 +216,36 @@ We found potential contact(s) but cannot auto-submit without higher confidence.
 Your claim is safely queued and will not be lost.
 ```
 
-For REQUIRES_REVIEW:
+For REQUIRES_REVIEW (NO EMAIL FOUND):
 ```
+⚠ SUPPORT CONTACT NOT FOUND
+
 Your warranty claim [claim_id] requires specialist assistance.
+
+---
+SEARCH RESULTS
+---
+Brand: [brand]
+Internal Database: No matching support contact found
+Web Search: No valid support email discovered
+
+---
+WHAT HAPPENED
+---
+We searched our database of known manufacturer support contacts and performed
+web searches for [brand] warranty support information, but could not find a
+verified support email address.
+
+---
+WHAT HAPPENS NEXT
+---
+- Your claim has been escalated to a support specialist
+- Our team will research alternative contact methods for [brand]
+- You will be notified once we locate the correct support channel
+- Expected response time: 24-48 hours
 
 We could not find support contact information for [brand].
 A support specialist will assist you with this claim.
-
-Expected response time: 24-48 hours
 ```
 
 ## IMPORTANT RULES
@@ -221,6 +264,12 @@ Expected response time: 24-48 hours
 11. For HUMAN_REVIEW: ALWAYS update status to PENDING with attempted_emails
 12. For HUMAN_REVIEW: ALWAYS include pending_reason for audit trail
 13. For HUMAN_REVIEW: Return user message about queued for verification
+14. For REQUIRES_REVIEW: DETECT no email found when recommended_email is empty/null
+15. For REQUIRES_REVIEW: NEVER trigger writer_agent when no email is found
+16. For REQUIRES_REVIEW: ALWAYS update status to REQUIRES_REVIEW (not PENDING)
+17. For REQUIRES_REVIEW: Set confidence_score to 0.0 (zero confidence with no email)
+18. For REQUIRES_REVIEW: Include search attempts in judge_reasoning for audit trail
+19. For REQUIRES_REVIEW: Return message mentioning brand name and specialist assistance
 """
 
 
@@ -308,8 +357,10 @@ root_agent = LlmAgent(
     1. Get claim details
     2. Search for support contacts (parallel DB + web)
     3. Judge confidence in results
-    4. Route: AUTO_SUBMIT (>= {int(settings.confidence_threshold * 100)}%) or \
-HUMAN_REVIEW (< {int(settings.confidence_threshold * 100)}%)
+    4. Route based on results:
+       - AUTO_SUBMIT (>= {int(settings.confidence_threshold * 100)}% confidence)
+       - HUMAN_REVIEW (< {int(settings.confidence_threshold * 100)}% confidence)
+       - REQUIRES_REVIEW (no email found)
 
     AUTO_SUBMIT FLOW (US-015):
     - When confidence >= {settings.confidence_threshold}: trigger writer_agent
@@ -323,8 +374,13 @@ HUMAN_REVIEW (< {int(settings.confidence_threshold * 100)}%)
     - Update claim status to PENDING with attempted_emails, confidence_score,
       judge_reasoning, and pending_reason
     - Store pending_reason: "Low confidence - requires human verification"
-    - Return message: "Your claim requires additional verification and has been
-      queued for review"
+    - Return message: "Your claim requires additional verification..."
+
+    REQUIRES_REVIEW FLOW (US-017):
+    - When neither DB nor web search finds valid email: DO NOT trigger writer_agent
+    - Update claim status to REQUIRES_REVIEW with confidence_score=0.0
+    - Store search attempts in judge_reasoning for audit trail
+    - Return message: "We could not find support contact for [brand]..."
 
     THRESHOLD: {settings.confidence_threshold} confidence for auto-submit
     """,
