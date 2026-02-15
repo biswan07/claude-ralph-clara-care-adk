@@ -5,28 +5,28 @@ concurrently. Both agents write to their own unique output_keys in session
 state, allowing downstream agents to read the results.
 """
 
-from google.adk.agents import ParallelAgent
+from google.adk.agents import SequentialAgent
 
 from clara_care.sub_agents.db_search_agent import db_search_agent
 from clara_care.sub_agents.web_search_agent import web_search_agent
 
 # =============================================================================
-# PARALLEL SEARCH PIPELINE
+# SEQUENTIAL SEARCH PIPELINE
 # =============================================================================
 
-search_pipeline = ParallelAgent(
+search_pipeline = SequentialAgent(
     name="search_pipeline",
-    description="""Parallel search pipeline for support contacts.
+    description="""Sequential search pipeline for support contacts.
 
-    Executes internal database search and web search concurrently:
-    - db_search_agent: Searches internal support_contacts table
-      → writes to state["internal_search_result"]
-    - web_search_agent: Searches web for manufacturer support emails
-      → writes to state["web_search_result"]
+    Executes internal database search and web search sequentially to avoid rate limits:
+    1. db_search_agent: Searches internal support_contacts table
+       → writes to state["internal_search_result"]
+    2. web_search_agent: Searches web for manufacturer support emails
+       → writes to state["web_search_result"]
 
     USE FOR:
     - Initial search phase of warranty claim processing
-    - Finding support contacts from multiple sources simultaneously
+    - Finding support contacts from multiple sources
     - Gathering all available data before confidence assessment
 
     OUTPUTS:

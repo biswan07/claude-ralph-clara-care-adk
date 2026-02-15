@@ -27,6 +27,18 @@ Prerequisites:
            gcloud secrets create SUPABASE_SERVICE_ROLE_KEY --data-file=-
        echo -n "sk-your-openai-key" | \\
            gcloud secrets create OPENAI_API_KEY --data-file=-
+       
+       # SMTP Secrets (Create these for email functionality)
+       echo -n "smtp.gmail.com" | \\
+           gcloud secrets create SMTP_HOST --data-file=-
+       echo -n "587" | \\
+           gcloud secrets create SMTP_PORT --data-file=-
+       echo -n "your-email@gmail.com" | \\
+           gcloud secrets create SMTP_USERNAME --data-file=-
+       echo -n "your-email@gmail.com" | \\
+           gcloud secrets create SMTP_FROM_EMAIL --data-file=-
+       echo -n "your-app-password" | \\
+           gcloud secrets create SMTP_PASSWORD --data-file=-
 
     6. Grant Secret Manager access to Compute Engine service account:
        gcloud projects add-iam-policy-binding PROJECT_ID \\
@@ -50,6 +62,14 @@ import argparse
 import os
 import sys
 from typing import Any
+
+# Try to load .env file
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -95,16 +115,19 @@ def create_env_vars(project_id: str) -> dict[str, Any]:
         # DO NOT use GOOGLE_API_KEY - it conflicts with Agent Engine's
         # internal Vertex AI session service
         "GOOGLE_GENAI_USE_VERTEXAI": "1",
-        # Google Cloud project ID for Supabase and other services
-        "GOOGLE_CLOUD_PROJECT": project_id,
+        # Google Cloud project ID is reserved and set automatically
+        # "GOOGLE_CLOUD_PROJECT": project_id,
         # Secrets from Google Cloud Secret Manager
-        # Format: {"secret": "SECRET_NAME", "version": "latest"}
-        "SUPABASE_URL": {"secret": "SUPABASE_URL", "version": "latest"},
-        "SUPABASE_SERVICE_ROLE_KEY": {
-            "secret": "SUPABASE_SERVICE_ROLE_KEY",
-            "version": "latest",
-        },
-        "OPENAI_API_KEY": {"secret": "OPENAI_API_KEY", "version": "latest"},
+        # Format: projects/{project_id}/secrets/{secret_name}/versions/{version}
+        "SUPABASE_URL": f"projects/{project_id}/secrets/SUPABASE_URL/versions/latest",
+        "SUPABASE_SERVICE_ROLE_KEY": f"projects/{project_id}/secrets/SUPABASE_SERVICE_ROLE_KEY/versions/latest",
+        "OPENAI_API_KEY": f"projects/{project_id}/secrets/OPENAI_API_KEY/versions/latest",
+        # SMTP Configuration - All managed via Secret Manager
+        "SMTP_HOST": f"projects/{project_id}/secrets/SMTP_HOST/versions/latest",
+        "SMTP_PORT": f"projects/{project_id}/secrets/SMTP_PORT/versions/latest",
+        "SMTP_USERNAME": f"projects/{project_id}/secrets/SMTP_USERNAME/versions/latest",
+        "SMTP_FROM_EMAIL": f"projects/{project_id}/secrets/SMTP_FROM_EMAIL/versions/latest",
+        "SMTP_PASSWORD": f"projects/{project_id}/secrets/SMTP_PASSWORD/versions/latest",
     }
 
 
@@ -117,7 +140,7 @@ def get_requirements() -> list[str]:
     return [
         # Core ADK and Gemini
         "google-adk>=0.3.0",
-        "google-genai>=1.24.0",
+        "google-genai>=1.0.0",
         "google-cloud-aiplatform[adk,agent_engines]",
         # Database and embeddings
         "supabase>=2.0.0",
@@ -125,6 +148,8 @@ def get_requirements() -> list[str]:
         # Configuration
         "pydantic>=2.0.0",
         "pydantic-settings>=2.0.0",
+        # Serialization
+        "cloudpickle==3.1.2",
         "python-dotenv>=1.0.0",
     ]
 
@@ -152,7 +177,7 @@ def deploy_agent(
     """
     # Set default staging bucket if not provided
     if staging_bucket is None:
-        staging_bucket = f"gs://{project_id}-staging"
+        staging_bucket = f"gs://clara-care-staging"
 
     print("=" * 60)
     print("ClaraCare Agent Engine Deployment")
@@ -168,6 +193,21 @@ def deploy_agent(
         import vertexai
         from vertexai import agent_engines
         from vertexai.preview import reasoning_engines
+        from google.cloud.aiplatform_v1 import types as aip_types
+
+        # MONKEYPATCH: Allow current Python version if not explicitly supported
+        # This fixes issues where local Python (e.g., 3.14) is ahead of the SDK's allowed list
+        try:
+            from vertexai.agent_engines import _agent_engines
+            import sys
+            
+            current_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+            if current_ver not in _agent_engines._SUPPORTED_PYTHON_VERSIONS:
+                print(f"Monkeypatching: Adding '{current_ver}' to supported python versions...")
+                _agent_engines._SUPPORTED_PYTHON_VERSIONS += (current_ver,)
+        except ImportError:
+            pass
+
     except ImportError as e:
         raise ImportError(
             "Required packages not installed. Run:\n"
@@ -199,7 +239,27 @@ def deploy_agent(
     )
 
     # Prepare environment variables
-    env_vars = create_env_vars(project_id)
+    raw_env_vars = create_env_vars(project_id)
+    env_vars = {}
+    
+    # Process env vars to correct SDK types
+    for key, value in raw_env_vars.items():
+        if isinstance(value, str) and value.startswith("projects/"):
+             # Convert string resource path to SecretRef
+             # Format: projects/{project}/secrets/{secret}/versions/{version}
+             parts = value.split("/")
+             if len(parts) >= 6 and parts[2] == "secrets":
+                 secret_name = parts[3]
+                 version = parts[5]
+                 env_vars[key] = aip_types.SecretRef(secret=secret_name, version=version)
+             else:
+                 env_vars[key] = value
+        elif isinstance(value, dict) and "secret" in value:
+             # Convert legacy dict format to SecretRef
+             env_vars[key] = aip_types.SecretRef(secret=value["secret"], version=value.get("version", "latest"))
+        else:
+             env_vars[key] = value
+
     requirements = get_requirements()
 
     print("\nDeploying to Agent Engine...")
@@ -214,8 +274,8 @@ def deploy_agent(
 
     print("\n  Environment variables:")
     for key, value in env_vars.items():
-        if isinstance(value, dict):
-            print(f"    - {key}: (Secret Manager: {value['secret']})")
+        if hasattr(value, "secret"):
+            print(f"    - {key}: (Secret Manager: {value.secret})")
         else:
             print(f"    - {key}: {value}")
 

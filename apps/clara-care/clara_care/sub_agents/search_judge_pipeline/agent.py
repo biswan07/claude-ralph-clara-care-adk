@@ -15,6 +15,8 @@ from google.adk.agents import SequentialAgent
 
 from clara_care.sub_agents.judge_agent import judge_agent
 from clara_care.sub_agents.search_pipeline import search_pipeline
+from clara_care.sub_agents.submission_agent import submission_agent
+from clara_care.sub_agents.writer_agent import writer_agent
 
 # =============================================================================
 # SEQUENTIAL SEARCH & JUDGE PIPELINE
@@ -22,7 +24,7 @@ from clara_care.sub_agents.search_pipeline import search_pipeline
 
 search_judge_pipeline = SequentialAgent(
     name="search_judge_pipeline",
-    description="""Sequential search-then-judge pipeline for warranty claims.
+    description="""Sequential search-judge-compose-finalize pipeline.
 
     WORKFLOW:
     Step 1 - Parallel Search (search_pipeline):
@@ -30,22 +32,33 @@ search_judge_pipeline = SequentialAgent(
       - web_search_agent: Searches web and validates emails → web_search_result
 
     Step 2 - Judge (judge_agent):
-      - Reads {internal_search_result} and {web_search_result} from state
-      - Calculates confidence score using weighted factors
-      - Decides: AUTO_SUBMIT (>= 0.80) or HUMAN_REVIEW (< 0.80)
+      - Calculates confidence score
+      - Decides: AUTO_SUBMIT or HUMAN_REVIEW
       → judge_verdict
+    
+    Step 3 - Composer (writer_agent):
+      - Checks judge_verdict
+      - IF AUTO_SUBMIT: Composes email → composed_email
+      - IF NOT AUTO_SUBMIT: Skips
+
+    Step 4 - Final Submission (submission_agent):
+      - Reads judge_verdict and composed_email
+      - GUARANTEED: Updates database status (submitted, pending, or requires_review)
 
     USE FOR:
-    - Complete search-and-assess workflow for warranty claims
-    - When you need both search results AND a confidence verdict
-
+    - Complete end-to-end processing for warranty claims
+    - GUARANTEED execution of database status updates
+    
     OUTPUTS IN STATE:
-    - internal_search_result: Internal DB search results (JSON)
-    - web_search_result: Web search results with validation (JSON)
-    - judge_verdict: Final confidence verdict with decision (JSON)
+    - internal_search_result, web_search_result
+    - judge_verdict
+    - composed_email (if auto-submit)
+    - claim_details
     """,
     sub_agents=[
         search_pipeline,  # Step 1: Parallel search (DB + Web)
         judge_agent,      # Step 2: Confidence assessment
+        writer_agent,     # Step 3: Conditional email composition
+        submission_agent, # Step 4: Finalize status
     ],
 )

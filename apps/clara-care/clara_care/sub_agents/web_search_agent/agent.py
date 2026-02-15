@@ -38,7 +38,8 @@ When asked to find support contact for a brand/manufacturer:
 2. **Execute Search**: Use google_search with the query from step 1
 3. **Extract Emails**: Call search_support_email again with raw results stored
    in your context, or manually extract email addresses from search results
-4. **Validate Each Email**: Use validate_email for each found email to check:
+4. **Extract Phone**: Extract any support phone numbers found in the search results
+5. **Validate Each Email**: Use validate_email for each found email to check:
    - Format validity (RFC 5322 compliance)
    - Domain existence (MX records)
    - Brand domain match (e.g., support@sony.com for Sony)
@@ -56,7 +57,8 @@ You MUST respond with a JSON object in exactly this format:
       "validation_score": 0.95,
       "domain_matches_brand": true,
       "is_valid": true,
-      "source_url": "https://brand.com/support"
+      "source_url": "https://brand.com/support",
+      "phone": "1-800-555-0199"
     }
   ],
   "sources": ["list of source URLs where emails were found"],
@@ -92,7 +94,8 @@ Your response:
       "validation_score": 0.92,
       "domain_matches_brand": true,
       "is_valid": true,
-      "source_url": "https://samsung.com/support"
+      "source_url": "https://samsung.com/support",
+      "phone": "1-800-726-7864"
     }
   ],
   "sources": ["https://samsung.com/support"],
@@ -168,22 +171,88 @@ Your response:
 """
 
 # =============================================================================
-# AGENT DEFINITION
+# WEB SEARCH EXECUTION AGENT
 # =============================================================================
 
-web_search_agent = LlmAgent(
-    name="web_search_agent",
+WEB_SEARCH_EXECUTOR_INSTRUCTION = """You are a web search specialist.
+Your ONLY job is to search for manufacturer warranty support contacts.
+
+1.  Identify the Product Brand from `claim_details` in the session state.
+2.  Construct a **SINGLE** targeted search query like: "[Brand] warranty support email".
+3.  Use the `google_search` tool **ONCE**.
+4.  Output the search results directly.
+5.  **DO NOT RETRY**. If the first search doesn't yield perfect results, pass whatever you found to the next agent.
+
+"""
+
+web_search_executor_agent = LlmAgent(
+    name="web_search_executor",
     model=settings.model_name,
+    description="Executes Google Search for support contacts.",
+    instruction=WEB_SEARCH_EXECUTOR_INSTRUCTION,
+    tools=[google_search],
+    output_key="web_search_raw_results",
+)
+
+# =============================================================================
+# WEB SEARCH PROCESSING AGENT
+# =============================================================================
+
+WEB_SEARCH_PROCESSOR_INSTRUCTION = """You are a data extraction specialist.
+Your job is to extract and validate emails from the search results provided by the previous agent.
+
+1.  Read the search results from the previous step (or from `web_search_raw_results` in state).
+2.  Use `search_support_email` (this tool can extract emails from text) to parse the results.
+3.  Extract any **support phone numbers** found in the text.
+4.  Use `validate_email` to check each found email.
+5.  Return the final JSON object, including the phone number in the email objects if found.
+
+## OUTPUT FORMAT
+You MUST respond with a JSON object in exactly this format:
+```json
+{
+  "found": true/false,
+  "emails": [
+    {
+      "email": "support@brand.com",
+      "validation_score": 0.95,
+      "domain_matches_brand": true,
+      "is_valid": true,
+      "source_url": "https://brand.com/support",
+      "phone": "1-800-555-0199"
+    }
+  ],
+  "sources": ["list of source URLs"],
+  "search_query": "the query used",
+  "brand_searched": "the brand name"
+}
+```
+"""
+
+web_search_processor_agent = LlmAgent(
+    name="web_search_processor",
+    model=settings.model_name,
+    description="Extracts and validates emails from search results.",
+    instruction=WEB_SEARCH_PROCESSOR_INSTRUCTION,
+    tools=[search_support_email, validate_email],
+    output_key="web_search_result",
+)
+
+# =============================================================================
+# AGENT DEFINITION (SEQUENTIAL PIPELINE)
+# =============================================================================
+
+from google.adk.agents import SequentialAgent
+
+web_search_agent = SequentialAgent(
+    name="web_search_agent",
     description="""Web search specialist for finding support contacts.
-
-    USE FOR:
-    - Finding manufacturer support emails via web search
-    - Fallback when internal database has no results
-    - Validating found emails for legitimacy
-
+    
+    Sequential Pipeline:
+    1. Executor: Searches Google for support contacts
+    2. Processor: Extracts and validates emails from search results
+    
     RETURNS: JSON with found, emails (list with validation scores), sources
     """,
-    instruction=WEB_SEARCH_AGENT_INSTRUCTION,
-    tools=[search_support_email, validate_email, google_search],
-    output_key="web_search_result",
+    sub_agents=[web_search_executor_agent, web_search_processor_agent],
 )

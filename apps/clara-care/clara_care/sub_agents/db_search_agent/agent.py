@@ -25,75 +25,17 @@ When given a warranty claim with a brand/manufacturer name:
 2. If found, extract and return the support contact information
 3. If not found, clearly indicate no internal record exists
 
-## SEARCH STRATEGY
+## SEARCH STRATEGY (SINGLE SHOT)
 
-- Use the exact brand name first (e.g., "Sony")
-- If no results, try common variations (e.g., "Sony Electronics")
-- Consider the product category if provided to narrow results
+1. **ONE SEARCH ONLY**: You have exactly *ONE* chance to find the contact.
+2. **USE SHORT NAME**: Search for the simplest version of the brand name (e.g., use "Sony" not "Sony Corporation").
+3. **WILDCARD IS AUTOMATIC**: The system automatically applies `%...%` wildcards. Searching "Sony" *will* match "Sony Electronics" and "Sony Support".
+4. **NO RETRIES**: If the first search returns `found: false`, STOP and return that result immediately. Do NOT try variations. Do NOT try different categories.
 
-## OUTPUT FORMAT
-
-You MUST respond with a JSON object in exactly this format:
-```json
-{
-  "found": true/false,
-  "email": "support email address or null",
-  "confidence": 0.0-1.0 confidence score,
-  "source": "internal_db",
-  "brand_name": "matched brand name",
-  "additional_contacts": {
-    "phone": "phone number or null",
-    "url": "support URL or null"
-  }
-}
-```
-
-## EXAMPLES
-
-### Example 1: Brand Found
-User: "Find support contact for Sony television"
-- You call: search_support_contacts(brand_name="Sony", product_category="Electronics")
-- Database returns a match with support@sony.com, confidence 0.95
-
-Your response:
-```json
-{
-  "found": true,
-  "email": "support@sony.com",
-  "confidence": 0.95,
-  "source": "internal_db",
-  "brand_name": "Sony",
-  "additional_contacts": {
-    "phone": "1-800-222-7669",
-    "url": "https://www.sony.com/support"
-  }
-}
-```
-
-### Example 2: Brand Not Found
-User: "Find support contact for UnknownBrand laptop"
-- You call: search_support_contacts(brand_name="UnknownBrand")
-- Database returns no results
-
-Your response:
-```json
-{
-  "found": false,
-  "email": null,
-  "confidence": 0.0,
-  "source": "internal_db",
-  "brand_name": "UnknownBrand",
-  "additional_contacts": null
-}
-```
-
-## IMPORTANT RULES
-
-- ALWAYS use the search_support_contacts tool - never guess email addresses
-- Return the FIRST and BEST match if multiple results exist
-- Include confidence score from database results
-- Set source to "internal_db" always
-- If database search fails with error, set found=false with confidence=0.0
+## EXAMPLE
+User: "Find support for DJI Drone"
+- You call: `search_support_contacts(brand_name="DJI", product_category="Drone")`
+- If not found -> Return `found: false` immediately. Do not try "DJI Technology".
 """
 
 # =============================================================================

@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 from google.adk.agents import LlmAgent
 
 from clara_care.config import settings
-from clara_care.sub_agents import search_judge_pipeline, writer_agent
-from clara_care.tools import get_claim_details, update_claim_status
+from clara_care.sub_agents import search_judge_pipeline
+from clara_care.tools import email_tool, get_claim_details, update_claim_status
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 ROOT_AGENT_INSTRUCTION = """You are ClaraCare, an AI assistant that processes
 warranty claims end-to-end. You coordinate searching for manufacturer support
 contacts, assessing confidence in the results, and routing claims appropriately.
+
+## DEFINITION OF DONE (CRITICAL)
+The task is ONLY complete when you have successfully executed the `update_claim_status` tool.
+For AUTO_SUBMIT cases, you MUST also execute the `send_email` tool before updating status.
+Do not output a final response to the user until these tools have been called and returned success.
 
 ## YOUR WORKFLOW
 
@@ -49,105 +54,37 @@ Delegate to the `search_judge_pipeline` which will:
 3. Validate found emails for legitimacy
 4. Assess confidence in the results and make a routing decision
 
+Store the result in your context as `judge_verdict` for downstream agents.
+The `judge_verdict` will contain the `confidence_score` which determines the flow in Step 3.
+
 The pipeline will provide:
 - internal_search_result: Results from internal database
 - web_search_result: Results from web search with validation
 - judge_verdict: Confidence assessment with recommended email and decision
 
-### Step 3: Route Based on Confidence
+### Step 3: REPORT RESULTS
+The `search_judge_pipeline` has already updated the database status.
+Your job is simply to report the outcome to the user.
 
-**HIGH CONFIDENCE (>= {confidence_threshold})**: AUTO_SUBMIT flow
-This is the happy path for claims where we have high confidence in the support
-email. When the judge_verdict shows confidence_score >= {confidence_threshold}:
+**IF `judge_verdict` decision is "AUTO_SUBMIT":**
+1. **CONFIRM** success to the user.
+2. **SHOW** the email preview (from `composed_email` in context).
 
-1. TRIGGER the `writer_agent` to compose a professional warranty claim email
-   - The writer_agent reads claim_details and judge_verdict from state
-   - It composes an email using the judge's recommended_email address
-   - Output is stored in state as `composed_email`
+**IF `judge_verdict` decision is "HUMAN_REVIEW":**
+1. **INFORM** the user that the claim is queued for review.
 
-2. UPDATE claim status to SUBMITTED using `update_claim_status`:
-   - claim_id: The claim being processed
-   - status: "SUBMITTED"
-   - support_email_used: The recommended_email from judge_verdict
-   - confidence_score: The confidence_score from judge_verdict
-   - judge_reasoning: The reasoning from judge_verdict
+**IF NO EMAIL FOUND:**
+1. **INFORM** the user that specialist assistance is required.
 
-3. RETURN confirmation with email preview to user including:
-   - Claim ID
-   - Support email address used
-   - Email subject and body preview
-   - Confidence score (as percentage)
-   - Confirmation message
-
-**LOW CONFIDENCE (< {confidence_threshold})**: HUMAN_REVIEW flow
-This is the cautious path for claims where confidence is below threshold.
-When the judge_verdict shows confidence_score < {confidence_threshold}:
-
-1. DO NOT trigger the writer_agent - no email should be composed or sent
-
-2. GATHER attempted emails from search results for audit:
-   - Extract emails from internal_search_result (if found)
-   - Extract emails from web_search_result (if found)
-   - Format as JSON array with scores:
-     '[{{"email": "email@brand.com", "score": 0.65}}, ...]'
-
-3. UPDATE claim status to PENDING using `update_claim_status`:
-   - claim_id: The claim being processed
-   - status: "PENDING"
-   - confidence_score: The confidence_score from judge_verdict
-   - judge_reasoning: The reasoning from judge_verdict
-   - attempted_emails: JSON array of emails with their confidence scores
-   - pending_reason: "Low confidence - requires human verification"
-
-4. RETURN message to user:
-   "Your claim requires additional verification and has been queued for review"
-
-**NO EMAIL FOUND (neither search found valid email)**: REQUIRES_REVIEW flow
-This handles the edge case when neither internal DB nor web search finds any email.
-The judge_verdict will indicate no valid email was found.
-
-1. DETECT no email found by checking:
-   - judge_verdict has no recommended_email (empty or null)
-   - OR judge_verdict explicitly states "no email found" in reasoning
-   - OR both internal_search_result and web_search_result have found=false
-
-2. DO NOT trigger the writer_agent - there's no email to compose to
-
-3. GATHER search attempt information for audit:
-   - Record that internal database was searched (for what brand/category)
-   - Record that web search was attempted (what queries were used)
-   - Store in judge_reasoning for transparency
-
-4. UPDATE claim status to REQUIRES_REVIEW using `update_claim_status`:
-   - claim_id: The claim being processed
-   - status: "REQUIRES_REVIEW"
-   - confidence_score: 0.0 (no email found means zero confidence)
-   - judge_reasoning: Include what was searched and why nothing was found
-   - pending_reason: "No support contact information found for [brand]"
-
-5. RETURN message to user:
-   "We could not find support contact information for [brand].
-   A support specialist will assist you."
+See **RESPONSE FORMAT** below for exact templates.
 
 ## TOOLS AVAILABLE
 
 1. `get_claim_details(claim_id)` - Retrieve full claim information
 
-2. `update_claim_status(claim_id, status, ...)` - Update claim status for tracking
-   Parameters:
-   - claim_id: The claim ID
-   - status: PENDING, SUBMITTED, FAILED, or REQUIRES_REVIEW
-   - support_email_used: Email used for SUBMITTED status
-   - confidence_score: Judge confidence (0.0-1.0)
-   - judge_reasoning: Explanation for the decision
-   - attempted_emails: JSON array for PENDING status (low confidence)
-     Format: '[{{"email": "x@brand.com", "score": 0.65}}]'
-   - pending_reason: Human-readable reason for PENDING status
-
 ## SUB-AGENTS AVAILABLE
 
 1. `search_judge_pipeline` - Searches for support contacts and assesses confidence
-2. `writer_agent` - Composes professional warranty claim emails
 
 ## STATE KEYS
 
@@ -177,11 +114,17 @@ Subject: [subject]
 [First 200 characters of email body...]
 
 ---
-CONFIDENCE METRICS
----
 Confidence Score: [score]% (Threshold: {confidence_threshold_percent}%)
 Decision: AUTO_SUBMIT
 Reasoning: [Brief judge reasoning]
+
+---
+ACTIONS TAKEN
+---
+- Composed warranty claim email
+- Sent email to [support_email]
+- Copied to user: [user_email]
+- Updated claim status to SUBMITTED
 
 ---
 NEXT STEPS
@@ -252,24 +195,44 @@ A support specialist will assist you with this claim.
 
 1. ALWAYS get claim details first before any other operation
 2. ALWAYS use the search_judge_pipeline for searching and confidence assessment
-3. NEVER send emails directly - only compose via writer_agent
-4. ALWAYS update claim status before returning to user
-5. NEVER fabricate support email addresses
-6. Confidence threshold for auto-submit is {confidence_threshold}
+
+    - **IF** `judge_verdict` has decision="AUTO_SUBMIT" **AND** `composed_email` is present:
+    - **OR IF** pipeline returns "Ready for email sending":
+      **YOU MUST CALL `send_email` with:**
+        - to_address: from composed_email
+        - subject: from composed_email
+        - body: from composed_email
+        - cc_address: user_email from claim_details
+        - reply_to: user_email from claim_details
+        - image_url: image_url from composed_email (or receipt_image_url from claim_details)
+      
+      **AFTER sending email, YOU MUST CALL `update_claim_status` with:**
+        - status="SUBMITTED"
+        - actions_taken=["Composed email", "Sent email to [address]", "Copied user"]
+        - email_body=body from composed_email
+        - contact_details=web_search_result (if available)
+
+4. NEVER send emails directly - only compose via writer_agent then use send_email tool
+5. ALWAYS update claim status before returning to user. The task is NOT DONE until `update_claim_status` is called.
+6. NEVER fabricate support email addresses
+7. Confidence threshold for auto-submit is {confidence_threshold}
    (that's {confidence_threshold_percent}%)
-7. For AUTO_SUBMIT flow: ALWAYS trigger writer_agent, then update status to SUBMITTED
-8. For AUTO_SUBMIT flow: ALWAYS include email preview in response to user
-9. Store support_email_used, confidence_score, and judge_reasoning in status update
-10. For HUMAN_REVIEW: NEVER trigger writer_agent when confidence < threshold
-11. For HUMAN_REVIEW: ALWAYS update status to PENDING with attempted_emails
-12. For HUMAN_REVIEW: ALWAYS include pending_reason for audit trail
-13. For HUMAN_REVIEW: Return user message about queued for verification
-14. For REQUIRES_REVIEW: DETECT no email found when recommended_email is empty/null
-15. For REQUIRES_REVIEW: NEVER trigger writer_agent when no email is found
-16. For REQUIRES_REVIEW: ALWAYS update status to REQUIRES_REVIEW (not PENDING)
-17. For REQUIRES_REVIEW: Set confidence_score to 0.0 (zero confidence with no email)
-18. For REQUIRES_REVIEW: Include search attempts in judge_reasoning for audit trail
-19. For REQUIRES_REVIEW: Return message mentioning brand name and specialist assistance
+8. For AUTO_SUBMIT flow: ALWAYS trigger writer_agent, then send_email, then update status
+9. For AUTO_SUBMIT flow: ALWAYS include email preview in response to user
+10. Store support_email_used, confidence_score, and judge_reasoning in status update
+11. For HUMAN_REVIEW: NEVER trigger writer_agent when confidence < threshold
+12. For HUMAN_REVIEW: ALWAYS update status to PENDING with attempted_emails
+13. For HUMAN_REVIEW: ALWAYS include pending_reason for audit trail
+14. For HUMAN_REVIEW: Return user message about queued for verification
+15. For REQUIRES_REVIEW: DETECT no email found when recommended_email is empty/null
+16. For REQUIRES_REVIEW: NEVER trigger writer_agent when no email is found
+17. For REQUIRES_REVIEW: ALWAYS update status to REQUIRES_REVIEW (not PENDING)
+18. For REQUIRES_REVIEW: Set confidence_score to 0.0 (zero confidence with no email)
+19. For REQUIRES_REVIEW: Include search attempts in judge_reasoning for audit trail
+20. For REQUIRES_REVIEW: Return message mentioning brand name and specialist assistance
+
+STOP: Do not return to the user until you have called `update_claim_status`.
+If you see "Ready for email sending", it means YOU must now send the email.
 """
 
 
@@ -358,40 +321,40 @@ root_agent = LlmAgent(
     2. Search for support contacts (parallel DB + web)
     3. Judge confidence in results
     4. Route based on results:
-       - AUTO_SUBMIT (>= {int(settings.confidence_threshold * 100)}% confidence)
-       - HUMAN_REVIEW (< {int(settings.confidence_threshold * 100)}% confidence)
-       - REQUIRES_REVIEW (no email found)
+        - AUTO_SUBMIT (>= {int(settings.confidence_threshold * 100)}% confidence)
+        - HUMAN_REVIEW (< {int(settings.confidence_threshold * 100)}% confidence)
+        - REQUIRES_REVIEW (no email found)
 
     AUTO_SUBMIT FLOW (US-015):
-    - When confidence >= {settings.confidence_threshold}: trigger writer_agent
-    - Compose email with recommended support address
-    - Update claim status to SUBMITTED with support_email_used, confidence_score,
-      and judge_reasoning
-    - Return confirmation with email preview to user
+    - When confidence >= {settings.confidence_threshold}: 
+    - OR when pipeline says "Ready for email sending. Email composed and verified.":
+    - CHECK for composed_email from pipeline
+    - MUST EXECUTE send_email
+    - MUST EXECUTE update_claim_status to submitted with actions_taken, email_body, and contact_details (from web_search_result)
+    - Return confirmation with email preview and actions taken
 
     HUMAN_REVIEW FLOW (US-016):
-    - When confidence < {settings.confidence_threshold}: DO NOT trigger writer_agent
-    - Update claim status to PENDING with attempted_emails, confidence_score,
-      judge_reasoning, and pending_reason
-    - Store pending_reason: "Low confidence - requires human verification"
+    - When confidence < {settings.confidence_threshold}:
+    - MUST EXECUTE update_claim_status to pending
     - Return message: "Your claim requires additional verification..."
 
     REQUIRES_REVIEW FLOW (US-017):
-    - When neither DB nor web search finds valid email: DO NOT trigger writer_agent
-    - Update claim status to REQUIRES_REVIEW with confidence_score=0.0
-    - Store search attempts in judge_reasoning for audit trail
+    - When NO email found:
+    - MUST EXECUTE update_claim_status to requires_review
     - Return message: "We could not find support contact for [brand]..."
 
     THRESHOLD: {settings.confidence_threshold} confidence for auto-submit
+    CRITICAL: ALWAYS update database status before returning to user.
+    If pipeline returns "Ready for email sending. Email composed and verified.", you MUST send the email.
     """,
     instruction=build_root_instruction(),
     tools=[
         get_claim_details,
+        email_tool.send_email,
         update_claim_status,
     ],
     sub_agents=[
         search_judge_pipeline,
-        writer_agent,
     ],
     before_agent_callback=before_agent_callback,
 )

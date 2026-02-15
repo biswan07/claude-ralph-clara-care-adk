@@ -11,45 +11,27 @@ ClaraCare is a multi-agent AI system built on **Google ADK (Agent Development Ki
 │                     ROOT ORCHESTRATOR                                │
 │              clara_care_orchestrator (LlmAgent)                     │
 │                                                                      │
-│  Tools: get_claim_details, update_claim_status                      │
-│  Sub-agents: search_judge_pipeline, writer_agent                    │
-└─────────────────────────────────┬───────────────────────────────────┘
-                                  │
-          ┌───────────────────────┴───────────────────────┐
-          ▼                                               ▼
-┌─────────────────────────┐                 ┌─────────────────────────┐
-│  SEARCH_JUDGE_PIPELINE  │                 │     WRITER_AGENT        │
-│   (SequentialAgent)     │                 │      (LlmAgent)         │
-│                         │                 │                         │
-│  1. search_pipeline     │                 │  Composes professional  │
-│  2. judge_agent         │                 │  warranty claim emails  │
-└───────────┬─────────────┘                 └─────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                      SEARCH_PIPELINE                                 │
-│                     (ParallelAgent)                                  │
-│                                                                      │
-│  ┌─────────────────────────┐    ┌─────────────────────────┐        │
-│  │   DB_SEARCH_AGENT       │    │   WEB_SEARCH_AGENT      │        │
-│  │      (LlmAgent)         │    │      (LlmAgent)         │        │
-│  │                         │    │                         │        │
-│  │  Tools:                 │    │  Tools:                 │        │
-│  │  - search_support_      │    │  - search_support_email │        │
-│  │    contacts             │    │  - validate_email       │        │
-│  └─────────────────────────┘    └─────────────────────────┘        │
+│  Tools: get_claim_details                                           │
+│  Sub-agents: search_judge_pipeline                                  │
 └─────────────────────────────────┬───────────────────────────────────┘
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        JUDGE_AGENT                                   │
-│                        (LlmAgent)                                    │
-│                                                                      │
-│  Evaluates search results and produces:                             │
-│  - recommended_email: Best email found (or null)                    │
-│  - confidence_score: 0.0 to 1.0                                     │
-│  - reasoning: Explanation for the decision                          │
-│  - decision: AUTO_SUBMIT | HUMAN_REVIEW | REQUIRES_REVIEW           │
+│                  SEARCH_JUDGE_PIPELINE (Sequential)                 │
+│                                                                     │
+│  1. SEARCH_PIPELINE (Parallel)                                      │
+│     - DB_SEARCH_AGENT                                               │
+│     - WEB_SEARCH_AGENT                                              │
+│                                                                     │
+│  2. JUDGE_AGENT                                                     │
+│     - Evaluates confidence & routing                                │
+│                                                                     │
+│  3. WRITER_AGENT                                                    │
+│     - Composes professional warranty claim emails                   │
+│                                                                     │
+│  4. SUBMISSION_AGENT                                                │
+│     - Sends emails (if AUTO_SUBMIT)                                 │
+│     - Updates DB status (GUARANTEED)                                │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -62,11 +44,12 @@ ClaraCare is a multi-agent AI system built on **Google ADK (Agent Development Ki
 The main entry point that coordinates the entire workflow:
 
 1. Retrieves claim details using `get_claim_details`
-2. Delegates to `search_judge_pipeline` for contact discovery
-3. Routes based on confidence:
-   - **>= 80%**: Triggers `writer_agent`, updates status to `SUBMITTED`
-   - **< 80%**: Updates status to `PENDING` for human review
-   - **No email**: Updates status to `REQUIRES_REVIEW`
+2. Delegates to `search_judge_pipeline` which handles the entire process:
+   - Search (Pipeline)
+   - Judgment (Judge)
+   - Composition (Writer)
+   - Submission/Finalization (Submission)
+3. Reports result to the user
 
 ### Search Pipeline (`search_pipeline`)
 
@@ -87,6 +70,13 @@ Evaluates all search results considering:
 
 Composes professional warranty claim emails when confidence is high enough. Reads claim details and judge verdict from session state.
 
+### Submission Agent (`submission_agent`)
+
+Finalizes the claim process.
+- **For AUTO_SUBMIT**: Sends the composed email and updates status to `SUBMITTED`.
+- **Otherwise**: Updates status to `PENDING` or `REQUIRES_REVIEW`.
+- Ensures DB status is always updated before the flow ends.
+
 ---
 
 ## Tools
@@ -98,6 +88,7 @@ Composes professional warranty claim emails when confidence is high enough. Read
 | `search_support_contacts` | `tools/db_search.py` | Query internal DB by brand/category |
 | `search_support_email` | `tools/web_search.py` | Web search for manufacturer support |
 | `validate_email` | `tools/email_validator.py` | Validate email format, DNS, domain match |
+| `send_email` | `tools/email_tool.py` | Send emails via SMTP (gmail, etc) |
 
 ---
 
@@ -123,8 +114,9 @@ clara_care/
     ├── web_search_agent/    # Web search + validation specialist
     ├── judge_agent/         # Confidence assessment
     ├── writer_agent/        # Email composition
+    ├── submission_agent/    # Final status update & email sending
     ├── search_pipeline/     # Parallel search (DB + Web)
-    └── search_judge_pipeline/ # Sequential: search -> judge
+    └── search_judge_pipeline/ # Sequential: search -> judge -> write -> submit
 ```
 
 ---
@@ -149,6 +141,13 @@ GOOGLE_GENAI_USE_VERTEXAI=1
 CONFIDENCE_THRESHOLD=0.80
 MODEL_NAME=gemini-2.5-flash
 EMBEDDING_MODEL=text-embedding-3-small
+
+# SMTP Configuration (Required for sending emails)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-email@gmail.com
+SMTP_PASSWORD=your-app-password
+SMTP_FROM_EMAIL=your-email@gmail.com
 ```
 
 ---
@@ -236,7 +235,9 @@ warranty_claims (
     support_email_used TEXT,
     confidence_score FLOAT,
     judge_reasoning TEXT,
-    composed_email TEXT
+    composed_email TEXT,
+    attempted_emails TEXT,
+    pending_reason TEXT
 )
 
 -- Audit trail for all status changes
@@ -246,7 +247,13 @@ claim_status_history (
     new_status TEXT,
     reason TEXT,
     changed_by TEXT,
-    created_at TIMESTAMP
+    created_at TIMESTAMP,
+    support_email_used TEXT,
+    confidence_score FLOAT,
+    judge_reasoning TEXT,
+    attempted_emails TEXT,
+    pending_reason TEXT,
+    created_by TEXT
 )
 ```
 
@@ -275,15 +282,58 @@ uv run ruff format clara_care
 
 ## Deployment
 
-### Deploy to Google Agent Engine
+### 1. Prerequisites: Secret Manager
+
+ClaraCare requires secrets to be stored in Google Secret Manager for security. Run the following commands (replace placeholders with your actual values):
 
 ```bash
-uv run python scripts/deploy_to_agent_engine.py
+# Set your project
+gcloud config set project your-project-id
+
+# Create secrets
+echo -n "https://your-project.supabase.co" | gcloud secrets create SUPABASE_URL --data-file=-
+echo -n "your-service-role-key" | gcloud secrets create SUPABASE_SERVICE_ROLE_KEY --data-file=-
+echo -n "sk-your-openai-key" | gcloud secrets create OPENAI_API_KEY --data-file=-
+
+# SMTP Configuration (Required for sending emails)
+echo -n "smtp.gmail.com" | gcloud secrets create SMTP_HOST --data-file=-
+echo -n "587" | gcloud secrets create SMTP_PORT --data-file=-
+echo -n "your-email@gmail.com" | gcloud secrets create SMTP_USERNAME --data-file=-
+echo -n "your-email@gmail.com" | gcloud secrets create SMTP_FROM_EMAIL --data-file=-
+echo -n "your-app-password" | gcloud secrets create SMTP_PASSWORD --data-file=-
+
+# Grant access to Compute Engine service account
+gcloud projects add-iam-policy-binding your-project-id \
+    --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
 ```
 
-### Test Deployed Agent
+### 2. Deploy to Vertex AI Agent Engine
+
+Run the deployment script, specifying your project ID:
 
 ```bash
+uv run python scripts/deploy_to_agent_engine.py --project smart-receipts-anz
+```
+
+This script will:
+1. Initialize Vertex AI with the specified project and location (us-central1).
+2. Gather all requirements and dependencies.
+3. Prepare the agent code (`clara_care`).
+4. securely pass Secret Manager references (`projects/...`) as environment variables.
+5. Deploy the agent to Vertex AI Agent Engine.
+
+### 3. Test Deployed Agent
+
+Use the provided script to test the deployed agent. You can pass the Resource ID returned from the deployment step, or rely on the default if it matches your latest deployment.
+
+**Note:** Ensure you are authenticated with the correct project to avoid `403 Permission Denied` errors.
+
+```bash
+# Test with the specific resource ID (Replace with your actual ID from deployment output)
+uv run python scripts/test_deployed_agent.py projects/73252715699/locations/us-central1/reasoningEngines/1304798145263173632
+
+# Or just run it (defaults to the latest successful deployment ID in the script):
 uv run python scripts/test_deployed_agent.py
 ```
 

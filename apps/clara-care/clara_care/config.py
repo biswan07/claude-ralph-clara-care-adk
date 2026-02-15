@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # Google Cloud configuration (required)
     google_cloud_project: str
 
+    # SMTP Configuration (optional but required for email sending)
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+
     # Model configuration (optional with defaults)
     model_name: str = "gemini-2.5-flash"
 
